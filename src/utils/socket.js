@@ -18,8 +18,14 @@ class SocketService {
     if (!this.socket) {
       this.socket = io(process.env.REACT_APP_SOCKET_URL || "http://localhost:4000", {
         autoConnect: false,
+        transports: ['websocket', 'polling'],
+        forceNew: true,
+        reconnection: true,
+        timeout: 5000,
       });
+
     }
+
     if (!this.socket.connected) {
       this.socket.connect();
     }
