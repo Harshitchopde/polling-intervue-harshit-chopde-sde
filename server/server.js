@@ -3,75 +3,65 @@ import { createServer } from "http";
 import { Server } from "socket.io";
 import cors from "cors";
 import { v4 as uuidv4 } from "uuid";
+
 const allowedOrigin = process.env.FRONT_END_URL;
+
 const app = express();
 const server = createServer(app);
 
-// Dynamic CORS configuration to handle webcontainer environments
-const corsOptions = {
-  origin: (origin, callback) => {
-    console.log("ORGING: ",origin)
-    // Allow requests with no origin (like mobile apps or curl requests)
-    if (!origin) return callback(null, true);
+// ✅ Centralized list of allowed origins
+const allowedOrigins = [
+  allowedOrigin,
+  "http://localhost:3000",
+  "http://127.0.0.1:3000",
+  "https://webcontainer-api.io"
+];
 
-    // Allow localhost with any protocol
-    if (origin.includes("localhost") || origin.includes("127.0.0.1")) {
-      return callback(null, true);
-    }
+// ✅ Reusable CORS check function
+const checkOrigin = (origin, callback) => {
+  console.log("Origin check:", origin);
 
-    // Allow only the FRONT_END_URL from env
+  if (!origin) return callback(null, true); // allow curl, mobile apps, etc.
 
-    if (origin === allowedOrigin) {
-        console.log("ORGING:f ",allowedOrigin)
-      return callback(null, true);
-    }
+  if (allowedOrigins.some((o) => origin.startsWith(o))) {
+    return callback(null, true);
+  }
 
-    // Allow webcontainer-api.io domains
-    if (origin.includes("webcontainer-api.io")) {
-      return callback(null, true);
-    }
-
-    // Default fallback
-    callback(null, true);
-  },
-  methods: ["GET", "POST"],
-  credentials: true,
+  console.warn("Blocked origin:", origin);
+  return callback(null, false); // ❌ don’t throw error (400), just block
 };
 
+// ✅ Express CORS middleware
+app.use(cors({
+  origin: checkOrigin,
+  methods: ["GET", "POST"],
+  credentials: true,
+}));
+
+app.use(express.json());
+
+// ✅ Socket.IO with same CORS config
 const io = new Server(server, {
   cors: {
-    origin: (origin, callback) => {
-      console.log("Socket.IO Origin:", origin);
-      if (!origin) return callback(null, true);
-      if (
-        origin.includes("localhost") ||
-        origin.includes("127.0.0.1") ||
-        origin.includes("webcontainer-api.io") ||
-        origin === process.env.FRONT_END_URL
-      ) {
-        return callback(null, true);
-      }
-      return callback(new Error("Not allowed by CORS"), false);
-    },
+    origin: checkOrigin,
     methods: ["GET", "POST"],
     credentials: true,
   },
 });
 
-app.use(cors(corsOptions));
-app.use(express.json());
-
+// -------------------------
 // In-memory storage
+// -------------------------
 let currentPoll = null;
 let students = new Map();
 let pollResults = [];
 let chatMessages = [];
 let pollTimer = null;
 
+// -------------------------
 // Helper functions
-const getPollResult = (pollId) => {
-  return pollResults.find((result) => result.pollId === pollId);
-};
+// -------------------------
+const getPollResult = (pollId) => pollResults.find((r) => r.pollId === pollId);
 
 const createPollResult = (poll) => {
   const result = {
@@ -84,9 +74,8 @@ const createPollResult = (poll) => {
     createdAt: poll.createdAt,
   };
 
-  // Initialize vote counts
-  poll.options.forEach((option) => {
-    result.votes[option] = 0;
+  poll.options.forEach((opt) => {
+    result.votes[opt] = 0;
   });
 
   pollResults.push(result);
@@ -95,26 +84,20 @@ const createPollResult = (poll) => {
 
 const updatePollResult = (pollId, studentId, studentName, answer) => {
   let result = getPollResult(pollId);
-  if (!result) {
-    return null;
-  }
+  if (!result) return null;
 
-  // Check if student already voted
-  const existingResponseIndex = result.responses.findIndex(
-    (r) => r.studentId === studentId
-  );
-  if (existingResponseIndex >= 0) {
-    // Update existing response
-    const oldAnswer = result.responses[existingResponseIndex].answer;
+  const existingIndex = result.responses.findIndex((r) => r.studentId === studentId);
+
+  if (existingIndex >= 0) {
+    const oldAnswer = result.responses[existingIndex].answer;
     result.votes[oldAnswer]--;
-    result.responses[existingResponseIndex] = {
+    result.responses[existingIndex] = {
       studentId,
       studentName,
       answer,
       timestamp: Date.now(),
     };
   } else {
-    // Add new response
     result.responses.push({
       studentId,
       studentName,
@@ -123,7 +106,6 @@ const updatePollResult = (pollId, studentId, studentName, answer) => {
     });
   }
 
-  // Update vote count
   result.votes[answer]++;
   result.totalVotes = result.responses.length;
 
@@ -157,41 +139,33 @@ const startPollTimer = (poll) => {
   const startTime = Date.now();
   const endTime = startTime + poll.maxTime * 1000;
 
-  // Send time updates every second
   const timeInterval = setInterval(() => {
     const now = Date.now();
     const remaining = Math.max(0, Math.floor((endTime - now) / 1000));
-
     io.emit("time-update", remaining);
 
     if (remaining <= 0) {
       clearInterval(timeInterval);
-
-      // End poll due to timeout
       const result = getPollResult(poll.id);
-      if (result) {
-        io.emit("poll-timeout", result);
-      }
+      if (result) io.emit("poll-timeout", result);
       endPoll();
     }
   }, 1000);
 
-  // Set timer to end poll
   pollTimer = setTimeout(() => {
     clearInterval(timeInterval);
     const result = getPollResult(poll.id);
-    if (result) {
-      io.emit("poll-timeout", result);
-    }
+    if (result) io.emit("poll-timeout", result);
     endPoll();
   }, poll.maxTime * 1000);
 };
 
-// Socket.IO connection handling
+// -------------------------
+// Socket.IO events
+// -------------------------
 io.on("connection", (socket) => {
   console.log("User connected:", socket.id);
 
-  // Send chat history to new user
   socket.emit("chat-history", chatMessages);
 
   socket.on("join-as-teacher", () => {
@@ -199,15 +173,8 @@ io.on("connection", (socket) => {
     socket.userType = "teacher";
     console.log("Teacher joined:", socket.id);
 
-    // Send current poll if exists
-    if (currentPoll) {
-      socket.emit("poll-created", currentPoll);
-    }
-
-    // Send current students
+    if (currentPoll) socket.emit("poll-created", currentPoll);
     socket.emit("students-updated", Array.from(students.values()));
-
-    // Send all poll results
     socket.emit("poll-results", pollResults);
   });
 
@@ -217,7 +184,6 @@ io.on("connection", (socket) => {
     socket.studentId = id;
     socket.studentName = name;
 
-    // Add or update student
     students.set(id, {
       id,
       name,
@@ -228,11 +194,9 @@ io.on("connection", (socket) => {
 
     console.log("Student joined:", name, id);
 
-    // Send current poll if exists
     if (currentPoll) {
       socket.emit("poll-created", currentPoll);
 
-      // Send current time remaining
       if (currentPoll.isActive && currentPoll.startTime) {
         const elapsed = Date.now() - currentPoll.startTime;
         const remaining = Math.max(
@@ -243,10 +207,8 @@ io.on("connection", (socket) => {
       }
     }
 
-    // Broadcast updated student list
     io.emit("students-updated", Array.from(students.values()));
 
-    // Send poll results if available
     if (pollResults.length > 0) {
       socket.emit("poll-results", pollResults);
     }
@@ -266,47 +228,34 @@ io.on("connection", (socket) => {
     };
 
     currentPoll = poll;
-
-    // Create poll result structure
     createPollResult(poll);
-
-    // Start timer
     startPollTimer(poll);
 
-    // Broadcast to all users
     io.emit("poll-created", poll);
-
     console.log("Poll created:", poll.question);
   });
 
   socket.on("submit-answer", ({ pollId, answer, studentId, studentName }) => {
     if (socket.userType !== "student") return;
-    if (!currentPoll || currentPoll.id !== pollId || !currentPoll.isActive)
-      return;
+    if (!currentPoll || currentPoll.id !== pollId || !currentPoll.isActive) return;
 
     const result = updatePollResult(pollId, studentId, studentName, answer);
     if (result) {
-      // Broadcast updated results
       io.emit("poll-results", result);
 
       console.log("Answer submitted:", studentName, "->", answer);
 
-      // Check if all students have answered
       const totalStudents = students.size;
       const totalResponses = result.responses.length;
 
       if (totalResponses >= totalStudents && totalStudents > 0) {
-        // All students have answered, end poll
-        setTimeout(() => {
-          endPoll();
-        }, 1000); // Small delay to show final results
+        setTimeout(() => endPoll(), 1000);
       }
     }
   });
 
   socket.on("end-poll", () => {
-    if (socket.userType !== "teacher") return;
-    endPoll();
+    if (socket.userType === "teacher") endPoll();
   });
 
   socket.on("kick-student", (studentId) => {
@@ -314,19 +263,14 @@ io.on("connection", (socket) => {
 
     const student = students.get(studentId);
     if (student) {
-      // Find student's socket and disconnect
       const studentSocket = io.sockets.sockets.get(student.socketId);
       if (studentSocket) {
         studentSocket.emit("kicked");
         studentSocket.disconnect();
       }
 
-      // Remove from students list
       students.delete(studentId);
-
-      // Broadcast updated student list
       io.emit("students-updated", Array.from(students.values()));
-
       console.log("Student kicked:", student.name);
     }
   });
@@ -341,22 +285,17 @@ io.on("connection", (socket) => {
     };
 
     chatMessages.push(chatMessage);
-
-    // Keep only last 100 messages
     if (chatMessages.length > 100) {
       chatMessages = chatMessages.slice(-100);
     }
 
-    // Broadcast to all users
     io.emit("message-received", chatMessage);
-
     console.log("Message sent:", sender, "->", message);
   });
 
   socket.on("disconnect", () => {
     console.log("User disconnected:", socket.id);
 
-    // Remove student if they disconnect
     if (socket.userType === "student" && socket.studentId) {
       students.delete(socket.studentId);
       io.emit("students-updated", Array.from(students.values()));
@@ -364,12 +303,13 @@ io.on("connection", (socket) => {
   });
 });
 
-// Health check endpoint
+// -------------------------
+// REST endpoints
+// -------------------------
 app.get("/health", (req, res) => {
   res.json({ status: "OK", timestamp: new Date().toISOString() });
 });
 
-// Get current poll status
 app.get("/api/poll/status", (req, res) => {
   res.json({
     currentPoll,
@@ -378,7 +318,9 @@ app.get("/api/poll/status", (req, res) => {
   });
 });
 
-// const PORT = process.env.PORT || 3001;
+// -------------------------
+// Start server
+// -------------------------
 const PORT = process.env.PORT || 4000;
 server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
