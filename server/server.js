@@ -39,7 +39,23 @@ const corsOptions = {
 };
 
 const io = new Server(server, {
-  cors: corsOptions,
+  cors: {
+    origin: (origin, callback) => {
+      console.log("Socket.IO Origin:", origin);
+      if (!origin) return callback(null, true);
+      if (
+        origin.includes("localhost") ||
+        origin.includes("127.0.0.1") ||
+        origin.includes("webcontainer-api.io") ||
+        origin === process.env.FRONT_END_URL
+      ) {
+        return callback(null, true);
+      }
+      return callback(new Error("Not allowed by CORS"), false);
+    },
+    methods: ["GET", "POST"],
+    credentials: true,
+  },
 });
 
 app.use(cors(corsOptions));
